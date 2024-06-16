@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 #include "server_exception.h"
+#include "http_request.h"
 #pragma comment(lib, "Ws2_32.lib")
 
 WebServer::WebServer() {
@@ -191,8 +192,16 @@ void WebServer::receive_message(size_t index) {
 	else {
 		server_sockets[index].buffer[len + bytesRecv] = '\0'; //add the null-terminating to make it a string
 		std::cout << "Web Server: Recieved: "<< bytesRecv <<" bytes of \"" << (&server_sockets[index].buffer[len]) << "\" message.\n";
-		
 		server_sockets[index].length += bytesRecv;
+		HTTPRequest request(server_sockets[index].buffer);
+		std::cout << request.get_method() << std::endl;
+		std::cout << request.get_uri() << std::endl;
+		std::cout << request.get_http_version() << std::endl;
+		for (auto it = request.get_headers().begin(); it != request.get_headers().end(); it++) {
+			std::cout << it->first << ": " << it->second << std::endl;
+		}
+		std::cout << request.get_body() << std::endl;
+		
 
 		if (server_sockets[index].length > 0) {
 			if (strncmp(server_sockets[index].buffer, "TimeString", 10) == 0)
