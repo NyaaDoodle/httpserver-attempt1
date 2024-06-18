@@ -7,7 +7,28 @@
 #include <time.h>
 #include "server_exception.h"
 #include "http_request.h"
+#include <fstream>
 #pragma comment(lib, "Ws2_32.lib")
+
+const std::map<std::string, int> WebServer::method_to_action = {
+	{"OPTIONS", SocketState::OPTIONS},
+	{"GET", SocketState::GET},
+	{"HEAD", SocketState::HEAD},
+	{"POST", SocketState::POST},
+	{"PUT", SocketState::PUT},
+	{"DELETE", SocketState::DEL},
+	{"TRACE", SocketState::TRACE}
+};
+
+const std::map<std::string, int> WebServer::uri_to_resource = {
+	{"/", WebServer::ROOT},
+	{"*", WebServer::ASTERISK},
+	{"/index.html", WebServer::INDEX},
+	{"/list", WebServer::LIST},
+	{"/db", WebServer::DB},
+};
+
+const std::string WebServer::RESOURCES_DIR = "c:\\temp\\";
 
 WebServer::WebServer() {
 	init_winsock();
@@ -66,6 +87,7 @@ void WebServer::server_loop() {
 	while (true) {
 		setup_fd_sets();
 		select_fd_sets();
+		timeout_sockets();
 		recv_act_on_select();
 		send_act_on_select();
 	}
@@ -102,6 +124,7 @@ void WebServer::select_fd_sets() {
 }
 
 void WebServer::recv_act_on_select() {
+	time_t timer;
 	for (size_t i = 0; i < MAX_SOCKETS && nfd > 0; i++) {
 		if (FD_ISSET(server_sockets[i].id, &wait_recv)) {
 			nfd--;
@@ -113,6 +136,8 @@ void WebServer::recv_act_on_select() {
 				receive_message(i);
 				break;
 			}
+			time(&timer);
+			server_sockets[i].recv_timer = timer;
 		}
 	}
 }
@@ -130,6 +155,20 @@ void WebServer::send_act_on_select() {
 	}
 }
 
+void WebServer::timeout_sockets() {
+	constexpr size_t SECONDS_IN_TWO_MINUTES = 120;
+	time(&server_timer);
+	for (size_t i = 0; i < MAX_SOCKETS; i++) {
+		if (server_sockets[i].recv == SocketState::RECEIVE) {
+			if ((server_timer - server_sockets[i].recv_timer) >= SECONDS_IN_TWO_MINUTES) {
+				std::cout << "Socket " << i << " timed out, closing connection." << std::endl;
+				closesocket(server_sockets[i].id);
+				remove_socket(i);
+			}
+		}	
+	}
+}
+
 bool WebServer::add_socket(SOCKET id, int what) {
 	for (int i = 0; i < MAX_SOCKETS; i++) {
 		if (server_sockets[i].recv == SocketState::EMPTY) {
@@ -137,6 +176,7 @@ bool WebServer::add_socket(SOCKET id, int what) {
 			server_sockets[i].recv = what;
 			server_sockets[i].send = SocketState::IDLE;
 			server_sockets[i].length = 0;
+			time(&server_sockets[i].recv_timer);
 			socket_count++;
 			return true;
 		}
@@ -144,13 +184,13 @@ bool WebServer::add_socket(SOCKET id, int what) {
 	return false;
 }
 
-void WebServer::remove_socket(size_t index) {
+void WebServer::remove_socket(const size_t index) {
 	server_sockets[index].recv = SocketState::EMPTY;
 	server_sockets[index].send = SocketState::EMPTY;
 	socket_count--;
 }
 
-void WebServer::accept_connection(size_t index) {
+void WebServer::accept_connection(const size_t index) {
 	SOCKET id = server_sockets[index].id;
 	struct sockaddr_in from;
 	int fromLen = sizeof(from);
@@ -172,12 +212,10 @@ void WebServer::accept_connection(size_t index) {
 	}
 }
 
-void WebServer::receive_message(size_t index) {
+void WebServer::receive_message(const size_t index) {
 	SOCKET msgSocket = server_sockets[index].id;
-
 	int len = server_sockets[index].length;
 	int bytesRecv = recv(msgSocket, &server_sockets[index].buffer[len], sizeof(server_sockets[index].buffer) - len, 0);
-	
 	if (SOCKET_ERROR == bytesRecv) {
 		std::cout << "Web Server: Error at recv(): " << WSAGetLastError() << std::endl;
 		closesocket(msgSocket);			
@@ -193,67 +231,286 @@ void WebServer::receive_message(size_t index) {
 		server_sockets[index].buffer[len + bytesRecv] = '\0'; //add the null-terminating to make it a string
 		std::cout << "Web Server: Recieved: "<< bytesRecv <<" bytes of \"" << (&server_sockets[index].buffer[len]) << "\" message.\n";
 		server_sockets[index].length += bytesRecv;
-		HTTPRequest request(server_sockets[index].buffer);
-		std::cout << request.get_method() << std::endl;
-		std::cout << request.get_uri() << std::endl;
-		std::cout << request.get_http_version() << std::endl;
-		for (auto it = request.get_headers().begin(); it != request.get_headers().end(); it++) {
-			std::cout << it->first << ": " << it->second << std::endl;
-		}
-		std::cout << request.get_body() << std::endl;
-		
-
+		server_sockets[index].request = HTTPRequest(&server_sockets[index].buffer[len]);
 		if (server_sockets[index].length > 0) {
-			if (strncmp(server_sockets[index].buffer, "TimeString", 10) == 0)
-			{
-				server_sockets[index].send  = SocketState::SEND;
-				server_sockets[index].send_subtype = SocketState::SEND_TIME;
-				memcpy(server_sockets[index].buffer, &server_sockets[index].buffer[10], server_sockets[index].length - 10);
-				server_sockets[index].length -= 10;
-				return;
-			}
-			else if (strncmp(server_sockets[index].buffer, "SecondsSince1970", 16) == 0)
-			{
-				server_sockets[index].send  = SocketState::SEND;
-				server_sockets[index].send_subtype = SocketState::SEND_SECONDS;
-				memcpy(server_sockets[index].buffer, &server_sockets[index].buffer[16], server_sockets[index].length - 16);
-				server_sockets[index].length -= 16;
-				return;
-			}
-			else if (strncmp(server_sockets[index].buffer, "Exit", 4) == 0)
-			{
-				closesocket(msgSocket);
-				remove_socket(index);
-				return;
-			}
+			server_sockets[index].send = SocketState::SEND;
+			const auto it = method_to_action.find(server_sockets[index].request.get_method());
+			server_sockets[index].send_action = (it != method_to_action.end()) ? it->second : SocketState::UNSUPPORTED;
+			memcpy(server_sockets[index].buffer, &server_sockets[index].buffer[bytesRecv], server_sockets[index].length - bytesRecv);
+			server_sockets[index].length -= bytesRecv;
 		}
 	}
-
 }
 
-void WebServer::send_message(size_t index) {
+void WebServer::send_message(const size_t index) {
 	int bytesSent = 0;
-	char sendBuff[255];
-
 	SOCKET msgSocket = server_sockets[index].id;
-	if (server_sockets[index].send_subtype == SocketState::SEND_TIME) {
-		time_t timer;
-		time(&timer);
-		strcpy(sendBuff, ctime(&timer));
-		sendBuff[strlen(sendBuff)-1] = 0;
-	}
-	else if(server_sockets[index].send_subtype == SocketState::SEND_SECONDS) {
-		time_t timer;
-		time(&timer);
-		_itoa((int)timer, sendBuff, 10);		
-	}
-
-	bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
+	
+	do_action(index);
+	bytesSent = send(msgSocket, send_buffer, (int)strlen(send_buffer), 0);
 	if (SOCKET_ERROR == bytesSent) {
 		std::cout << "Web Server: Error at send(): " << WSAGetLastError() << std::endl;	
 		return;
 	}
 
-	std::cout<<"Web Server: Sent: "<<bytesSent<<"\\"<<strlen(sendBuff)<<" bytes of \""<<sendBuff<<"\" message.\n";	
+	std::cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(send_buffer) << " bytes of \"" << send_buffer << "\" message.\n";	
 	server_sockets[index].send = SocketState::IDLE;
+}
+
+void WebServer::do_action(const size_t index) {
+	int action = server_sockets[index].send_action;
+	const HTTPRequest& request = server_sockets[index].request;
+	switch (action) {
+	case SocketState::OPTIONS:
+		do_options(request);
+		break;
+	case SocketState::GET:
+		do_get(request);
+		break;
+	case SocketState::HEAD:
+		do_head(request);
+		break;
+	case SocketState::POST:
+		do_post(request);
+		break;
+	case SocketState::PUT:
+		do_put(request);
+		break;
+	case SocketState::DEL:
+		do_delete(request);
+		break;
+	case SocketState::TRACE:
+		do_trace(request);
+		break;
+	default:
+		unsupported_request(request);
+		break;
+	}
+}
+
+void WebServer::do_options(const HTTPRequest& request) {
+	const char* ROOT_ALLOW = "OPTIONS, TRACE";
+	const char* INDEX_ALLOW = "OPTIONS, GET, HEAD";
+	const char* LIST_ALLOW = "OPTIONS, POST, DELETE";
+	const char* DB_ALLOW = "OPTIONS, PUT, DELETE";
+	HTTPResponse response;
+	auto it = uri_to_resource.find(request.get_uri());
+	if (it != uri_to_resource.end()) {
+		response = HTTPResponse(204, request.get_http_version());
+		switch (it->second) {
+		case ROOT:
+			response.insert_header("Allow", ROOT_ALLOW);
+			break;
+		case INDEX:
+			response.insert_header("Allow", INDEX_ALLOW);
+			break;
+		case LIST:
+			response.insert_header("Allow", LIST_ALLOW);
+			break;
+		case DB:
+			response.insert_header("Allow", DB_ALLOW);
+			break;
+		case ASTERISK:
+			break;
+		}
+		write_to_send_buffer(response);
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::do_get(const HTTPRequest& request, const bool head_req) {
+	const std::map<std::string, std::string> lang_to_filename = { {"en", "index-en.html"}, {"he", "index-he.html"}, {"fr", "index-fr.html"} };
+	const std::string DEFAULT_LANG = "en";
+	std::string lang_parameter;
+	std::string index_filename;
+	HTTPResponse response;
+	auto uri_it = uri_to_resource.find(request.get_uri());
+	if (uri_it != uri_to_resource.end()) {
+		switch (uri_it->second) {
+		case INDEX:
+			response = HTTPResponse(200, request.get_http_version());
+			if (request.get_queries().find("lang") != request.get_queries().end()) {
+				lang_parameter = request.get_queries().at("lang");
+				if (lang_to_filename.find(lang_parameter) != lang_to_filename.end()) {
+					index_filename = lang_to_filename.at(lang_parameter);
+				}
+				else {
+					index_filename = lang_to_filename.at(DEFAULT_LANG);
+				}
+			}
+			else {
+				index_filename = lang_to_filename.at(DEFAULT_LANG);
+			}
+			file_to_body(response, (RESOURCES_DIR + index_filename));
+			if (response.get_status_code() != 500) {
+				response.insert_header("Content-Type", "text/html");
+			}
+			if (head_req) {
+				response.set_body();
+			}
+			write_to_send_buffer(response);
+			break;
+		default:
+			resource_not_found(request);
+			break;
+		}
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::do_head(const HTTPRequest& request) {
+	do_get(request, true);
+}
+void WebServer::do_post(const HTTPRequest& request) {
+	HTTPResponse response;
+	std::string body;
+	auto it = uri_to_resource.find(request.get_uri());
+	if (it != uri_to_resource.end()) {
+		switch (it->second) {
+		case LIST:
+			response = HTTPResponse(200, request.get_http_version());
+			body = request.get_body();
+			std::cout << "Adding to list: \"" << body << "\"\n";
+			list.push_back(body);
+			list_to_body(response);
+			write_to_send_buffer(response);
+			break;
+		default:
+			resource_not_found(request);
+			break;
+		}
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::do_put(const HTTPRequest& request) {
+	HTTPResponse response;
+	std::string id;
+	std::string value;
+	auto it = uri_to_resource.find(request.get_uri());
+	if (it != uri_to_resource.end()) {
+		switch (it->second) {
+		case DB:
+			response = HTTPResponse(200, request.get_http_version());
+			id = (request.get_queries().find("id") != request.get_queries().end()) ? request.get_queries().at("id") : std::to_string(db.size());
+			value = request.get_body();
+			std::cout << "Adding/Modifying to db: (id: " << id << ", value: \"" << value << "\")\n";
+			if (db.find(id) == db.end()) { response.set_status_code(201); }
+			db[id] = value;
+			db_to_body(response);
+			write_to_send_buffer(response);
+			break;
+		default:
+			resource_not_found(request);
+			break;
+		}
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::do_delete(const HTTPRequest& request) {
+	HTTPResponse response;
+	auto it = uri_to_resource.find(request.get_uri());
+	if (it != uri_to_resource.end()) {
+		switch (it->second) {
+		case LIST:
+			response = HTTPResponse(200, request.get_http_version());
+			std::cout << "Clearing list..." << std::endl;
+			list.clear();
+			list_to_body(response);
+			write_to_send_buffer(response);
+			break;
+		case DB:
+			response.set_status_code(200);
+			std::cout << "Clearing db..." << std::endl;
+			db.clear();
+			db_to_body(response);
+			write_to_send_buffer(response);
+			break;
+		default:
+			resource_not_found(request);
+			break;
+		}
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::do_trace(const HTTPRequest& request) {
+	HTTPResponse response;
+	auto it = uri_to_resource.find(request.get_uri());
+	if (it != uri_to_resource.end()) {
+		switch (it->second) {
+		case ROOT:
+			response = HTTPResponse(200, request.get_http_version());
+			response.insert_header("Content-Type", "message/http");
+			response.set_body(request.get_message_copy());
+			write_to_send_buffer(response);
+			break;
+		default:
+			resource_not_found(request);
+			break;
+		}
+	}
+	else {
+		resource_not_found(request);
+	}
+}
+void WebServer::unsupported_request(const HTTPRequest& request) {
+	HTTPResponse response(400, request.get_http_version());
+	write_to_send_buffer(response);
+}
+
+void WebServer::resource_not_found(const HTTPRequest& request) {
+	HTTPResponse response(404, request.get_http_version());
+	write_to_send_buffer(response);
+}
+
+void WebServer::write_to_send_buffer(const HTTPResponse& response) {
+	strcpy(send_buffer, response.write_response().c_str());
+}
+
+void WebServer::file_to_body(HTTPResponse& response, std::string file_name) {
+	std::ifstream file_stream(file_name);
+	if (!file_stream.is_open()) {
+		response = HTTPResponse(500, response.get_http_version());
+		return;
+	}
+	std::string line;
+	while (std::getline(file_stream, line)) {
+		response.append_to_body(line);
+	}
+	file_stream.close();
+}
+
+void WebServer::list_to_body(HTTPResponse& response) {
+	constexpr size_t COMMA_SP = 2;
+	response.append_to_body("{");
+	for (const std::string& str : list) {
+		response.append_to_body("\"");
+		response.append_to_body(str);
+		response.append_to_body("\"");
+		response.append_to_body(", ");
+	}
+	if (response.get_body().size() >= 2) { response.pop_back_n_body(COMMA_SP); }
+	response.append_to_body("}");
+}
+
+void WebServer::db_to_body(HTTPResponse& response) {
+	constexpr size_t COMMA_SP = 2;
+	response.append_to_body("{");
+	for (const auto& pair : db) {
+		response.append_to_body("(");
+		response.append_to_body(pair.first);
+		response.append_to_body(": ");
+		response.append_to_body(pair.second);
+		response.append_to_body(")");
+		response.append_to_body(", ");
+	}
+	if (response.get_body().size() >= 2) { response.pop_back_n_body(COMMA_SP); }
+	response.append_to_body("}");
 }

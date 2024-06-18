@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "http_response.h"
 
 const std::map<int, std::string> HTTPResponse::reason_phrase = {
@@ -42,6 +43,16 @@ const std::map<int, std::string> HTTPResponse::reason_phrase = {
         {505, "HTTP Version not supported"}
 };
 
+HTTPResponse::HTTPResponse(const int status_code, const std::string& http_version, const std::string& body) {
+    set_status_code(status_code);
+    set_http_version(http_version);
+    set_body(body);
+    time(&timer);
+    std::string dt = ctime(&timer);
+    dt.pop_back();
+    insert_header("Date", dt);
+}
+
 const std::string& HTTPResponse::get_http_version() const { return http_version; }
 const int HTTPResponse::get_status_code() const { return status_code; }
 const std::map<std::string, std::string>& HTTPResponse::get_headers() const { return headers; }
@@ -49,8 +60,21 @@ const std::string& HTTPResponse::get_body() const { return body; }
 void HTTPResponse::set_http_version(const std::string& http_version) { this->http_version = http_version; }
 void HTTPResponse::set_status_code(const int status_code) { this->status_code = status_code; }
 void HTTPResponse::insert_header(const std::string& key, const std::string& value) { headers[key] = value; }
-void HTTPResponse::set_body(const std::string& body) { this->body = body; }
-std::string HTTPResponse::write_response() {
+void HTTPResponse::set_body(const std::string& body) { 
+    this->body = body;
+    update_content_length();
+}
+void HTTPResponse::append_to_body(const std::string& append) { 
+    body.append(append);
+    update_content_length();
+}
+void HTTPResponse::pop_back_n_body(const size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        body.pop_back();
+    }
+    update_content_length();
+}
+std::string HTTPResponse::write_response() const {
     const char* CRLF = "\r\n";
     const char* SP = " ";
     const char* COLON_SP = ": ";
@@ -70,4 +94,7 @@ std::string HTTPResponse::write_response() {
     response.append(CRLF);
     response.append(body);
     return response;
+}
+void HTTPResponse::update_content_length() {
+    insert_header("Content-Length", std::to_string(body.size()));
 }
